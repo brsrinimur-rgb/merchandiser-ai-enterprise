@@ -1,3 +1,7 @@
-.env
-__pycache__/
-*.pyc
+# Safe local defaults. Run setup_d365.bat to replace these values.
+D365_TENANT_ID=
+D365_CLIENT_ID=
+D365_CLIENT_SECRET=
+D365_RESOURCE_URL=
+D365_COMPANY=
+D365_ENABLE_WRITEBACK=false

@@ -293,40 +293,12 @@ def main():
     print("Generating purchase orders...")
     build_purchase_orders(session, items, stores)
 
-    print("Seeding default category configs (service level, one demo promo, OTB budgets)...")
-    from sqlalchemy import func
-
-    # data-driven budgets: base each category's monthly budget off its own
-    # trailing-30-day cost of goods sold, so some categories land comfortably
-    # funded and others deliberately tight (creates real OTB exceptions to
-    # demo the capital optimizer against, instead of guessed numbers)
-    last_30_start = TODAY - timedelta(days=29)
-    cogs_rows = (
-        session.query(Item.category, func.sum(Sale.quantity * Item.cost))
-        .join(Sale, Sale.item_id == Item.id)
-        .filter(Sale.date >= last_30_start)
-        .group_by(Item.category)
-        .all()
-    )
-    cogs_by_category = {cat: float(val or 0) for cat, val in cogs_rows}
-
-    stock_rows = (
-        session.query(Item.category, func.sum(Stock.on_hand * Item.cost))
-        .join(Stock, Stock.item_id == Item.id)
-        .filter(Stock.date == TODAY)
-        .group_by(Item.category)
-        .all()
-    )
-    stock_value_by_category = {cat: float(val or 0) for cat, val in stock_rows}
-
+    print("Seeding default category configs (service level + one demo promo)...")
     configs = []
     for category in CATEGORIES:
-        cogs = cogs_by_category.get(category, 0)
-        budget_factor = random.uniform(0.55, 1.15)  # some categories tight, some comfortable
         configs.append(CategoryConfig(
             category=category,
             service_level_pct=98.0 if category in ("Footwear", "Fragrance") else 95.0,
-            monthly_budget=round(cogs * budget_factor, -2),  # nearest 100
         ))
     # give one growing category an upcoming promo window so the uplift logic
     # in replenishment has something real to apply
@@ -335,11 +307,6 @@ def main():
             c.promo_start = TODAY + timedelta(days=10)
             c.promo_end = TODAY + timedelta(days=24)
             c.promo_uplift_pct = 35.0
-        if c.category == "Women's Apparel":
-            # declining category -- give it a closing-stock target below where
-            # it sits today, so the OTB "stock target gap" signal has something
-            # real to flag (this category should be buying less, not more)
-            c.closing_stock_target = round(stock_value_by_category.get(c.category, 0) * 0.7, -2)
     session.add_all(configs)
     session.commit()
 

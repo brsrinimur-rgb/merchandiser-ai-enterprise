@@ -8,6 +8,3 @@ faker==25.2.0
 pydantic==2.7.1
 python-multipart==0.0.9
 openpyxl==3.1.2
-requests==2.32.3
-msal==1.31.1
-python-dotenv==1.0.1

@@ -12,7 +12,7 @@ This schema is intentionally close to what an ERP (e.g. Dynamics 365) already
 exposes, so a real integration later is a mapping exercise, not a redesign.
 """
 from sqlalchemy import (
-    Column, Integer, String, Float, Date, DateTime, Text, ForeignKey, ForeignKeyConstraint
+    Column, Integer, String, Float, Date, ForeignKey, ForeignKeyConstraint
 )
 from sqlalchemy.orm import relationship
 from database import Base
@@ -111,10 +111,9 @@ class PurchaseOrder(Base):
 
 
 class CategoryConfig(Base):
-    """Per-category settings a merchandiser/buyer can tune -- replenishment
-    service level, an optional promotion window, and Open-to-Buy planning
-    inputs (rolling monthly budget + closing-stock target). One row per
-    category; falls back to sensible defaults if absent."""
+    """Per-category replenishment settings a merchandiser can tune -- service
+    level target and an optional promotion window with an uplift multiplier.
+    One row per category; falls back to global defaults if absent."""
     __tablename__ = "category_config"
 
     id = Column(Integer, primary_key=True)
@@ -123,68 +122,3 @@ class CategoryConfig(Base):
     promo_start = Column(Date, nullable=True)
     promo_end = Column(Date, nullable=True)
     promo_uplift_pct = Column(Float, default=0.0)       # e.g. 40 = +40% demand during promo window
-    monthly_budget = Column(Float, default=0.0)         # rolling-30-day purchase budget, cost basis; 0/None = unlimited
-    closing_stock_target = Column(Float, nullable=True)  # target period-end stock value, cost basis; None = "maintain current"
-
-
-class PurchaseDecision(Base):
-    """One row per store/item recommendation that has entered the approval
-    workflow (pulled in from the Capital Optimizer). This is the queue --
-    current status, current quantity, and where it sits in the pipeline:
-
-        pending_merchandiser -> pending_buyer -> pending_final -> po_ready
-                             \\-> rejected  (from any stage)
-
-    Every edit and every stage transition is logged as a DecisionHistory
-    row, not overwritten -- that's the audit trail. When a decision reaches
-    po_ready, a real PurchaseOrder row is created from it, closing the loop
-    back into the operational data model."""
-    __tablename__ = "purchase_decisions"
-
-    id = Column(Integer, primary_key=True)
-    store_id = Column(Integer, ForeignKey("stores.id"))
-    item_id = Column(Integer, ForeignKey("items.id"))
-    category = Column(String, index=True)          # denormalized for fast queue filtering/reporting
-
-    ai_recommended_qty = Column(Integer)            # what the Capital Optimizer originally proposed
-    ai_recommended_value = Column(Float)
-    current_qty = Column(Integer)                   # current qty after any merchandiser/buyer edits
-    current_value = Column(Float)
-
-    source_exception_flag = Column(String, nullable=True)   # carried over from the optimizer, if any
-    is_emergency = Column(String, default="false")           # "true"/"false" (kept as string for sqlite simplicity)
-
-    status = Column(String, default="pending_merchandiser", index=True)
-    otb_impact_value = Column(Float, default=0.0)   # current_value -- what this decision consumes from OTB if approved
-
-    po_number = Column(String, nullable=True)        # set once status reaches po_ready
-
-    created_at = Column(DateTime)
-    updated_at = Column(DateTime)
-
-    store = relationship("Store")
-    item = relationship("Item")
-
-
-class DecisionHistory(Base):
-    """Audit trail: one immutable row per action taken on a PurchaseDecision --
-    who did it, when, what changed, and why."""
-    __tablename__ = "decision_history"
-
-    id = Column(Integer, primary_key=True)
-    decision_id = Column(Integer, ForeignKey("purchase_decisions.id"), index=True)
-
-    actor = Column(String)                # free-text name/handle -- no auth system yet, see README
-    stage = Column(String)                # "merchandiser" | "buyer" | "final" | "system"
-    action = Column(String)               # "created" | "edit" | "approve" | "reject" | "po_created"
-
-    from_status = Column(String)
-    to_status = Column(String)
-    previous_qty = Column(Integer, nullable=True)
-    new_qty = Column(Integer, nullable=True)
-    reason = Column(Text, nullable=True)
-    otb_impact_value = Column(Float, nullable=True)
-
-    timestamp = Column(DateTime)
-
-    decision = relationship("PurchaseDecision")

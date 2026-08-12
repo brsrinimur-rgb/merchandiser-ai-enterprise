@@ -592,16 +592,12 @@ def purchase_planning(dfs, m, budget_by_category=None):
     category_plan = m.groupby("category", as_index=False).agg(
         suggested_qty=("suggested_order_qty", "sum"), order_value=("order_value", "sum"),
     )
-    # default to the persisted per-category budgets from Settings/CategoryConfig
-    # unless the caller explicitly passes a different budget map -- see
-    # category_otb() for the full OTB breakdown (actuals, commitments, etc);
-    # this is just the quick budget-vs-ask view shown on the Purchase Planning tab
-    if budget_by_category is None:
-        budget_by_category = {cat: cfg.get("monthly_budget", 0) for cat, cfg in _category_config().items()}
-    category_plan["budget"] = category_plan["category"].map(budget_by_category).fillna(0)
-    category_plan["open_to_buy"] = np.where(
-        category_plan["budget"] > 0, (category_plan["budget"] - category_plan["order_value"]).round(2), None
-    )
+    if budget_by_category:
+        category_plan["budget"] = category_plan["category"].map(budget_by_category).fillna(0)
+        category_plan["open_to_buy"] = (category_plan["budget"] - category_plan["order_value"]).round(2)
+    else:
+        category_plan["budget"] = None
+        category_plan["open_to_buy"] = None
 
     priority = m[m["suggested_order_qty"] > 0].copy()
     priority["priority_score"] = (
@@ -622,208 +618,6 @@ def purchase_planning(dfs, m, budget_by_category=None):
         "stop_buy_list": stop_buy.sort_values("stock_value", ascending=False).head(30).to_dict("records"),
         "moq_flags": m[m["below_moq"]][["item_code", "item_name", "store_name", "suggested_order_qty", "moq"]]
             .to_dict("records"),
-    }
-
-
-# --------------------------------------------------------------------------
-# Open-to-Buy (OTB)
-# --------------------------------------------------------------------------
-
-def category_otb(dfs, m):
-    """
-    Per-category Open-to-Buy, on a cost basis, over a rolling 30-day period:
-
-        available_otb = monthly_budget - actual_purchases_mtd - commitments
-
-    Shown alongside (informational -- not netted into the formula above):
-      - planned_receipts: value of open POs landing within the period
-      - markdown_impact: $ of category stock currently flagged for markdown
-        (capital that could be freed by marking down instead of buying more)
-      - closing_stock_target vs current_stock_value: whether the category
-        should be building or shedding inventory this period
-    """
-    today = _today(dfs)
-    cfg = _category_config()
-    period_start = today - timedelta(days=29)
-
-    po, items = dfs["po"], dfs["items"]
-    po_items = po.merge(items[["item_id", "category", "cost"]], on="item_id", how="left")
-
-    received_in_period = po_items[
-        po_items["received_date"].notna() & (po_items["received_date"] >= period_start)
-    ].copy()
-    received_in_period["value"] = received_in_period["received_qty"] * received_in_period["cost"]
-    actual_purchases = received_in_period.groupby("category")["value"].sum()
-
-    open_po = po_items[po_items["status"] == "open"].copy()
-    open_po["value"] = open_po["balance_qty"] * open_po["cost"]
-    commitments = open_po.groupby("category")["value"].sum()
-
-    planned = open_po[open_po["eta"] <= today + timedelta(days=30)]
-    planned_receipts = planned.groupby("category")["value"].sum()
-
-    markdown = markdown_promotion(m)
-    md_df = pd.DataFrame(markdown["markdown_candidates"])
-    if not md_df.empty:
-        md_df["impact"] = md_df["stock_value"] * md_df["recommended_markdown_pct"] / 100.0
-        markdown_impact = md_df.groupby("category")["impact"].sum()
-    else:
-        markdown_impact = pd.Series(dtype=float)
-
-    current_stock_value = m.groupby("category")["stock_value"].sum()
-
-    rows = []
-    for cat in sorted(m["category"].dropna().unique()):
-        c = cfg.get(cat, {})
-        budget = c.get("monthly_budget") or 0
-        actual = float(actual_purchases.get(cat, 0))
-        commit = float(commitments.get(cat, 0))
-        planned_recv = float(planned_receipts.get(cat, 0))
-        md_impact = float(markdown_impact.get(cat, 0))
-        stock_val = float(current_stock_value.get(cat, 0))
-        target = c.get("closing_stock_target")
-
-        available = (budget - actual - commit) if budget else None
-
-        rows.append({
-            "category": cat,
-            "monthly_budget": budget if budget else None,
-            "actual_purchases_mtd": round(actual, 2),
-            "commitments": round(commit, 2),
-            "planned_receipts": round(planned_recv, 2),
-            "markdown_impact": round(md_impact, 2),
-            "current_stock_value": round(stock_val, 2),
-            "closing_stock_target": target,
-            "stock_target_gap": round(target - stock_val, 2) if target is not None else None,
-            "available_otb": round(available, 2) if available is not None else None,
-            "budget_status": (
-                "no budget set" if not budget else
-                ("over budget" if available is not None and available < 0 else "within budget")
-            ),
-        })
-    return rows
-
-
-# --------------------------------------------------------------------------
-# Inventory Capital Optimizer
-# --------------------------------------------------------------------------
-
-def inventory_capital_optimizer(dfs, m, otb_rows=None):
-    """
-    Runs the buying decision sequence end to end instead of jumping straight
-    from "need X units" to "buy X units":
-
-        1. Transfer existing excess between stores first
-        2. Incoming/open PO is already netted into suggested_order_qty
-           (via inventory_position back in build_metrics_frame)
-        3. What's left after (1) is the true net requirement
-        4. Cap that against the category's available OTB -- an emergency
-           stockout order is still let through (safety takes priority over
-           budget) but gets flagged rather than silently approved
-        5. What's left after capping is the recommended PO
-        6. Anything capped, or any emergency override, lands in the
-           exceptions list for a buyer/manager to approve manually
-
-    This produces a recommendation + an exception *list* -- it does not
-    persist an approve/reject decision anywhere. A stateful review workflow
-    with an audit trail is the next milestone, not this one.
-    """
-    if otb_rows is None:
-        otb_rows = category_otb(dfs, m)
-    otb_by_cat = {r["category"]: r for r in otb_rows}
-
-    stores = dfs["stores"][["store_id", "store_name"]]
-    name_to_id = dict(zip(stores["store_name"], stores["store_id"]))
-
-    transfers = store_transfer_suggestions(m)
-    transfer_in = {}
-    for t in transfers:
-        to_id = name_to_id.get(t["to_store"])
-        if to_id is None:
-            continue
-        key = (t["item_id"], to_id)
-        transfer_in[key] = transfer_in.get(key, 0) + t["transfer_qty"]
-
-    candidates = m[m["suggested_order_qty"] > 0].copy()
-
-    def net_after_transfer(row):
-        applied = min(row["suggested_order_qty"], transfer_in.get((row["item_id"], row["store_id"]), 0))
-        raw_net = row["suggested_order_qty"] - applied
-        case_pack = row["case_pack"] if row["case_pack"] and row["case_pack"] > 0 else 1
-        net_qty = int(math.ceil(raw_net / case_pack) * case_pack) if raw_net > 0 else 0
-        return pd.Series({"transfer_applied": applied, "net_requirement_qty": net_qty})
-
-    candidates[["transfer_applied", "net_requirement_qty"]] = candidates.apply(net_after_transfer, axis=1)
-    candidates["net_requirement_value"] = candidates["net_requirement_qty"] * candidates["cost"]
-
-    candidates["priority_score"] = (
-        candidates["emergency_order_qty"] * 1000
-        + candidates["out_of_stock_risk"].astype(int) * 500
-        + candidates["growth_pct"].clip(lower=0) * 2
-    )
-    candidates = candidates.sort_values(["category", "priority_score"], ascending=[True, False])
-
-    remaining_budget = {cat: r["available_otb"] for cat, r in otb_by_cat.items()}
-
-    results = []
-    for row in candidates.itertuples():
-        cat = row.category
-        net_qty = int(row.net_requirement_qty)
-        value = row.net_requirement_value
-        is_emergency = row.emergency_order_qty > 0
-        budget_left = remaining_budget.get(cat)
-
-        if net_qty <= 0:
-            recommended_qty, flag = 0, None
-        elif budget_left is None:
-            recommended_qty, flag = net_qty, None          # no budget configured -- unlimited
-        elif is_emergency:
-            recommended_qty = net_qty
-            flag = "emergency_override_exceeds_otb" if value > budget_left else None
-            remaining_budget[cat] = budget_left - value
-        elif value <= budget_left:
-            recommended_qty, flag = net_qty, None
-            remaining_budget[cat] = budget_left - value
-        elif budget_left > 0:
-            case_pack = row.case_pack if row.case_pack and row.case_pack > 0 else 1
-            affordable_units = int(budget_left // row.cost) if row.cost else 0
-            affordable_packs = (affordable_units // case_pack) * case_pack
-            recommended_qty = max(0, min(net_qty, affordable_packs))
-            flag = "partially_funded_exceeds_otb" if recommended_qty > 0 else "exceeds_otb"
-            remaining_budget[cat] = budget_left - recommended_qty * row.cost
-        else:
-            recommended_qty, flag = 0, "exceeds_otb"
-
-        results.append({
-            "store_id": int(row.store_id), "store_name": row.store_name,
-            "item_id": int(row.item_id), "item_code": row.item_code, "item_name": row.item_name,
-            "category": cat,
-            "original_suggested_qty": int(row.suggested_order_qty),
-            "transfer_applied_qty": int(row.transfer_applied),
-            "net_requirement_qty": net_qty,
-            "recommended_po_qty": int(recommended_qty),
-            "recommended_po_value": round(recommended_qty * row.cost, 2),
-            "emergency": bool(is_emergency),
-            "exception_flag": flag,
-        })
-
-    exceptions = [r for r in results if r["exception_flag"] is not None]
-    total_original_value = float((candidates["suggested_order_qty"] * candidates["cost"]).sum())
-    total_after_transfer_value = float((candidates["net_requirement_qty"] * candidates["cost"]).sum())
-    total_recommended_value = float(sum(r["recommended_po_value"] for r in results))
-
-    return {
-        "otb_by_category": otb_rows,
-        "recommendations": sorted(results, key=lambda r: -r["recommended_po_value"]),
-        "exceptions": exceptions,
-        "summary": {
-            "total_original_ask_value": round(total_original_value, 2),
-            "capital_freed_by_transfer": round(total_original_value - total_after_transfer_value, 2),
-            "total_net_requirement_value": round(total_after_transfer_value, 2),
-            "total_recommended_po_value": round(total_recommended_value, 2),
-            "held_back_by_otb_value": round(total_after_transfer_value - total_recommended_value, 2),
-            "exception_count": len(exceptions),
-        },
     }
 
 
@@ -1124,11 +918,6 @@ def executive_dashboard(dfs, m):
     critical = [a for a in actions if a["priority"] == "Critical"]
     high = [a for a in actions if a["priority"] == "High"]
 
-    otb_rows = category_otb(dfs, m)
-    budgeted = [r for r in otb_rows if r["available_otb"] is not None]
-    total_available_otb = round(sum(r["available_otb"] for r in budgeted), 2) if budgeted else None
-    over_budget_categories = [r["category"] for r in budgeted if r["available_otb"] < 0]
-
     return {
         "sales": {
             "total_sales_30d": round(total_sales_30, 2),
@@ -1147,9 +936,7 @@ def executive_dashboard(dfs, m):
         "buying": {
             "recommended_purchase_value": round(recommended_purchase_value, 2),
             "extra_order_value": round(extra_order_value, 2),
-            "open_to_buy": total_available_otb,
-            "budgeted_category_count": len(budgeted),
-            "over_budget_categories": over_budget_categories,
+            "open_to_buy": None,
             "supplier_commitments": round(supplier_commitments, 2),
         },
         "ai": {
@@ -1195,16 +982,13 @@ def load_category_config(db):
             "promo_start": r.promo_start,
             "promo_end": r.promo_end,
             "promo_uplift_pct": r.promo_uplift_pct,
-            "monthly_budget": r.monthly_budget,
-            "closing_stock_target": r.closing_stock_target,
         }
         for r in rows
     }
 
 
 def save_category_config(db, category, service_level_pct=None, promo_start=None,
-                          promo_end=None, promo_uplift_pct=None, monthly_budget=None,
-                          closing_stock_target=None, clear_closing_stock_target=False):
+                          promo_end=None, promo_uplift_pct=None):
     row = db.query(CategoryConfig).filter(CategoryConfig.category == category).first()
     if not row:
         row = CategoryConfig(category=category)
@@ -1217,11 +1001,5 @@ def save_category_config(db, category, service_level_pct=None, promo_start=None,
         row.promo_end = promo_end
     if promo_uplift_pct is not None:
         row.promo_uplift_pct = promo_uplift_pct
-    if monthly_budget is not None:
-        row.monthly_budget = monthly_budget
-    if clear_closing_stock_target:
-        row.closing_stock_target = None
-    elif closing_stock_target is not None:
-        row.closing_stock_target = closing_stock_target
     db.commit()
     return row
