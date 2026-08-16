@@ -11,7 +11,7 @@
 </head>
 <body><div class="app"><aside class="sidebar"><div class="brand"><div class="logo">M</div><div><h2>Merchandiser AI<br>Enterprise <span class="badge">1.0</span></h2><small>Retail Planning, Buying<br>& Decision Intelligence</small></div></div><div id="nav"></div><div class="api-state"><span id="apiDot" class="dot bad"></span><b id="apiLabel">Checking API…</b><br><span id="apiDetail">FastAPI at port 8000</span></div></aside><main class="main"><header class="top"><div class="crumb">Merchandiser AI 360 / <b id="crumb">Executive Dashboard</b></div><div class="top-actions"><input class="input" placeholder="Your name / role"><button class="btn" onclick="window.open(API+'/docs','_blank')">API Docs</button><button class="btn" onclick="render(current)">Refresh</button></div></header><div id="content" class="content"></div></main></div>
 <script>
-const API=window.MERCH_API_BASE||'http://127.0.0.1:8000';
+const API=window.MERCH_API_BASE||'https://merchandiser-ai-enterprise.onrender.com';
 const groups=[
  ['COMMAND CENTER',[['dashboard','▣','Executive Dashboard'],['action-center','⚡','AI Action Center']]],
  ['PLANNING',[['replenishment','↻','Replenishment'],['purchase-planning','◇','Capital Optimizer'],['otb','◎','Open-to-Buy']]],
