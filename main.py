@@ -11,7 +11,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query, UploadFile, File, Form, HTTPException
+from fastapi import Depends, FastAPI, Query, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
@@ -19,6 +19,7 @@ import analytics
 import import_data
 from database import SessionLocal
 from integration_hub import router as integration_hub_router
+from security import require_api_key
 
 app = FastAPI(
     title="Merchandiser AI 360 Enterprise",
@@ -84,13 +85,13 @@ def startup():
     build_cache()
 
 
-@app.post("/api/refresh")
+@app.post("/api/refresh", dependencies=[Depends(require_api_key)])
 def refresh():
     build_cache()
     return {"status": "refreshed", "rows": len(_cache["m"])}
 
 
-@app.get("/api/meta")
+@app.get("/api/meta", dependencies=[Depends(require_api_key)])
 def meta():
     dfs = _cache["dfs"]
     return clean({
@@ -102,62 +103,62 @@ def meta():
     })
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", dependencies=[Depends(require_api_key)])
 def dashboard():
     return clean(analytics.executive_dashboard(_cache["dfs"], _cache["m"]))
 
 
-@app.get("/api/sales-intelligence")
+@app.get("/api/sales-intelligence", dependencies=[Depends(require_api_key)])
 def sales_intel():
     return clean(analytics.sales_intelligence(_cache["dfs"], _cache["m"]))
 
 
-@app.get("/api/replenishment")
+@app.get("/api/replenishment", dependencies=[Depends(require_api_key)])
 def replenishment(only_action: bool = Query(True)):
     return clean(analytics.auto_replenishment(_cache["m"], only_action=only_action))
 
 
-@app.get("/api/stock-intelligence")
+@app.get("/api/stock-intelligence", dependencies=[Depends(require_api_key)])
 def stock_intel():
     return clean(analytics.stock_intelligence(_cache["m"]))
 
 
-@app.get("/api/category-management")
+@app.get("/api/category-management", dependencies=[Depends(require_api_key)])
 def category_mgmt():
     return clean(analytics.category_management(_cache["m"]))
 
 
-@app.get("/api/transfers")
+@app.get("/api/transfers", dependencies=[Depends(require_api_key)])
 def transfers():
     return clean(analytics.store_transfer_suggestions(_cache["m"]))
 
 
-@app.get("/api/purchase-planning")
+@app.get("/api/purchase-planning", dependencies=[Depends(require_api_key)])
 def purchase_planning():
     return clean(analytics.purchase_planning(_cache["dfs"], _cache["m"]))
 
 
-@app.get("/api/variant-intelligence")
+@app.get("/api/variant-intelligence", dependencies=[Depends(require_api_key)])
 def variant_intel():
     return clean(analytics.variant_intelligence(_cache["m"]))
 
 
-@app.get("/api/markdown-promotion")
+@app.get("/api/markdown-promotion", dependencies=[Depends(require_api_key)])
 def markdown_promo():
     return clean(analytics.markdown_promotion(_cache["m"]))
 
 
-@app.get("/api/supplier-intelligence")
+@app.get("/api/supplier-intelligence", dependencies=[Depends(require_api_key)])
 def supplier_intel():
     return clean(analytics.supplier_intelligence(_cache["dfs"]))
 
 
-@app.get("/api/forecasting")
+@app.get("/api/forecasting", dependencies=[Depends(require_api_key)])
 def forecasting():
     return clean(analytics.ai_forecasting(_cache["dfs"], _cache["m"]))
 
 
-@app.get("/api/action-center")
+@app.get("/api/action-center", dependencies=[Depends(require_api_key)])
 def action_center():
     return clean(analytics.ai_action_center(_cache["dfs"], _cache["m"]))
 
@@ -176,21 +177,21 @@ def health():
 # Real-data import layer
 # --------------------------------------------------------------------------
 
-@app.get("/api/import/entities")
+@app.get("/api/import/entities", dependencies=[Depends(require_api_key)])
 def import_entities():
     """List of importable entities with their required/optional columns --
     drives the entity picker + column hints in the Data Import screen."""
     return clean(import_data.entity_list())
 
 
-@app.get("/api/import/template/{entity}", response_class=PlainTextResponse)
+@app.get("/api/import/template/{entity}", response_class=PlainTextResponse, dependencies=[Depends(require_api_key)])
 def import_template(entity: str):
     if entity not in import_data.SCHEMAS:
         raise HTTPException(status_code=404, detail=f"Unknown entity '{entity}'")
     return import_data.template_csv(entity)
 
 
-@app.post("/api/import/{entity}/validate")
+@app.post("/api/import/{entity}/validate", dependencies=[Depends(require_api_key)])
 async def import_validate(entity: str, file: UploadFile = File(...)):
     if entity not in import_data.SCHEMAS:
         raise HTTPException(status_code=404, detail=f"Unknown entity '{entity}'")
@@ -205,7 +206,7 @@ async def import_validate(entity: str, file: UploadFile = File(...)):
     return clean(report)
 
 
-@app.post("/api/import/commit")
+@app.post("/api/import/commit", dependencies=[Depends(require_api_key)])
 def import_commit(token: str = Form(...)):
     db = SessionLocal()
     try:
@@ -223,12 +224,12 @@ def import_commit(token: str = Form(...)):
 # Replenishment configuration (service level targets + promotions)
 # --------------------------------------------------------------------------
 
-@app.get("/api/config/categories")
+@app.get("/api/config/categories", dependencies=[Depends(require_api_key)])
 def get_category_config():
     return clean(_cache.get("cat_config", {}))
 
 
-@app.post("/api/config/categories/{category}")
+@app.post("/api/config/categories/{category}", dependencies=[Depends(require_api_key)])
 def set_category_config_endpoint(
     category: str,
     service_level_pct: float = Form(None),

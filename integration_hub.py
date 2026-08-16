@@ -14,10 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-router = APIRouter(prefix="/api/integration-hub", tags=["Enterprise Integration Hub"])
+from security import require_api_key
+
+router = APIRouter(
+    prefix="/api/integration-hub",
+    tags=["Enterprise Integration Hub"],
+    dependencies=[Depends(require_api_key)],
+)
 LOG_FILE = Path(__file__).resolve().parent / "integration_logs.json"
 
 
